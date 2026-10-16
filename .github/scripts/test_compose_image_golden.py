@@ -9,6 +9,8 @@ check_container_tag_source.py. Run directly:
 
 from __future__ import annotations
 
+import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -91,6 +93,68 @@ class LoadContainersEnvTest(unittest.TestCase):
                 "${VSS_CONTAINER_REGISTRY}/vss-configurator:${VSS_CONTAINER_TAG}"
             )
         )
+
+
+class ReleaseRegistryDefaultsTest(unittest.TestCase):
+    CONTAINERS_ENV = Path(__file__).resolve().parents[2] / "deploy/docker/containers.env"
+    IMAGE_VARS = re.findall(r"^(\w+_IMAGE)=", CONTAINERS_ENV.read_text(), re.MULTILINE)
+
+    def resolve_images(self, overrides):
+        result = subprocess.run(
+            [
+                "/bin/bash",
+                "-c",
+                'source "$1"; shift; for name; do printf "%s=%s\\n" "$name" "${!name}"; done',
+                "containers-env-test",
+                str(self.CONTAINERS_ENV),
+                *self.IMAGE_VARS,
+            ],
+            env=overrides,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return dict(line.split("=", 1) for line in result.stdout.splitlines())
+
+    def test_all_images_default_to_release_registry(self):
+        images = self.resolve_images({})
+        self.assertTrue(images)
+        for name, image in images.items():
+            with self.subTest(name=name):
+                self.assertTrue(image.startswith("nvcr.io/nvidia/vss-core/"), image)
+
+    def test_custom_registry_applies_to_all_images(self):
+        images = self.resolve_images(
+            {
+                "VSS_CONTAINER_REGISTRY": "registry.example/release",
+            }
+        )
+        for name, image in images.items():
+            with self.subTest(name=name):
+                self.assertTrue(image.startswith("registry.example/release/"), image)
+
+    def test_individual_image_overrides_are_preserved(self):
+        for name in self.IMAGE_VARS:
+            with self.subTest(name=name):
+                override = "registry.example/custom/image:custom-tag"
+                images = self.resolve_images(
+                    {
+                        "VSS_CONTAINER_REGISTRY": "registry.example/shared",
+                        name: override,
+                    }
+                )
+                self.assertEqual(images.pop(name), override)
+                self.assertTrue(
+                    all(
+                        image.startswith("registry.example/shared/")
+                        for image in images.values()
+                    )
+                )
+
+    def test_empty_overrides_fall_back_to_release_registry(self):
+        overrides = dict.fromkeys(self.IMAGE_VARS, "")
+        overrides["VSS_CONTAINER_REGISTRY"] = ""
+        self.assertEqual(self.resolve_images(overrides), self.resolve_images({}))
 
 
 class ParameterizedNameMatchingTest(unittest.TestCase):
